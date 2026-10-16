@@ -426,5 +426,107 @@ $("build").onclick = async () => {
   finally { btn.disabled = !(current && current.ok); }
 };
 </script>
+
+  // ===== 3. PARKADE WITH NATIVE FORMA PLANS =====
+(() => {
+  const box = document.createElement("div");
+  box.style.cssText = "border-top:3px solid #0a6;margin-top:16px;padding:10px 0;font:13px sans-serif";
+  box.innerHTML = `
+    <b>3. Parkade with native Forma plans</b><br>
+    <label><input type="checkbox" id="np_above" checked> Build above ground (to look at it)</label><br>
+    <button id="np_build" style="margin-top:8px;padding:8px 12px;background:#0a6;color:#fff;border:0;border-radius:4px;cursor:pointer">Build parkade with plans</button>
+    <pre id="np_log" style="white-space:pre-wrap;font-size:12px;margin-top:8px"></pre>`;
+  document.body.appendChild(box);
+  const out = (t) => { document.getElementById("np_log").textContent += t + "\n"; };
+  const area = (p) => { let s = 0; for (let i = 0; i < p.length; i++) { const a = p[i], b = p[(i + 1) % p.length]; s += a[0] * b[1] - b[0] * a[1]; } return s / 2; };
+
+  async function getSite() {
+    try {
+      const paths = await Forma.geometry.getPathsByCategory({ category: "site_limit" });
+      let best = null, bestA = 0;
+      for (const path of paths || []) {
+        const fp = await Forma.geometry.getFootprint({ path });
+        let raw = fp && (fp.coordinates || fp.points || fp);
+        while (Array.isArray(raw) && Array.isArray(raw[0]) && Array.isArray(raw[0][0])) raw = raw[0];
+        const pts = (raw || []).map((q) => (Array.isArray(q) ? [q[0], q[1]] : [q.x, q.y]));
+        const a = Math.abs(area(pts));
+        if (pts.length >= 3 && a > bestA) { best = pts; bestA = a; }
+      }
+      if (best) { out("Site: Forma site limit (" + bestA.toFixed(0) + " m2)"); return best; }
+    } catch (e) { out("Site limit read error: " + e.message); }
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith("mg_site_")) { out("Site: saved DXF boundary"); return JSON.parse(localStorage.getItem(k)); }
+    }
+    return null;
+  }
+
+  document.getElementById("np_build").onclick = async () => {
+    document.getElementById("np_log").textContent = "";
+    try {
+      const site = await getSite();
+      if (!site) throw new Error("No site found. Draw a site limit or load the DXF first.");
+      const LEVELS = 6, H = 2.75, S = 5.5, A = 6.7, WALL = 0.3, STALL = 2.5, CW = 9.0, CD = 6.6;
+
+      let L = 0, th = 0;
+      for (let i = 0; i < site.length; i++) {
+        const a = site[i], b = site[(i + 1) % site.length];
+        const d = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        if (d > L) { L = d; th = Math.atan2(b[1] - a[1], b[0] - a[0]); }
+      }
+      const c = Math.cos(th), s = Math.sin(th), p0 = site[0];
+      let u0 = 1e9, u1 = -1e9, v0 = 1e9, v1 = -1e9;
+      for (const p of site) {
+        const dx = p[0] - p0[0], dy = p[1] - p0[1];
+        const u = dx * c + dy * s, v = -dx * s + dy * c;
+        u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v);
+      }
+      const W = u1 - u0 - 2 * WALL, D = v1 - v0 - 2 * WALL;
+      const ou = u0 + WALL, ov = v0 + WALL;
+      const ox = p0[0] + ou * c - ov * s, oy = p0[1] + ou * s + ov * c;
+      if (D < S + 2 * A + CD || W < 2 * S + 2 * A + CW) throw new Error("Site too small for this layout.");
+
+      const cx = W / 2, cy = (S + D) / 2;
+      const verts = [], idOf = {};
+      const V = (x, y) => { const k = x.toFixed(3) + "," + y.toFixed(3); if (!idOf[k]) { idOf[k] = "v" + verts.length; verts.push({ id: idOf[k], x, y }); } return idOf[k]; };
+      const poly = (pts) => pts.map(([x, y]) => V(x, y));
+      const coreRect = [[cx - CW / 2, cy - CD / 2], [cx + CW / 2, cy - CD / 2], [cx + CW / 2, cy + CD / 2], [cx - CW / 2, cy + CD / 2]];
+
+      const units = [
+        { program: "PARKING", polygon: poly([[0, 0], [W, 0], [W, S], [W - S, S], [S, S], [0, S]]), holes: [] },
+        { program: "PARKING", polygon: poly([[0, S], [S, S], [S, D - 3], [0, D - 3]]), holes: [] },
+        { program: "PARKING", polygon: poly([[W - S, S], [W, S], [W, D - 6], [W - S, D - 6]]), holes: [] },
+        { program: "CORE", polygon: poly([[W - S, D - 6], [W, D - 6], [W, D], [W - S, D]]), holes: [] },
+        { program: "CORE", polygon: poly([[0, D - 3], [S, D - 3], [S, D], [0, D]]), holes: [] },
+        { program: "CORRIDOR", polygon: poly([[S, S], [W - S, S], [W - S, D - 6], [W - S, D], [S, D], [S, D - 3]]), holes: [poly(coreRect)] },
+        { program: "CORE", polygon: poly(coreRect), holes: [] },
+      ];
+
+      const floors = [];
+      for (let i = 0; i < LEVELS; i++) floors.push({ planId: "PARKADE", height: H });
+      const { urn } = await Forma.elements.floorStack.createFromFloors({
+        floors, plans: [{ id: "PARKADE", vertices: verts, units }],
+      });
+
+      const wx = ox + cx * c - (D / 2) * s, wy = oy + cx * s + (D / 2) * c;
+      let elev = 0;
+      try { const r = await Forma.terrain.getElevationAt({ x: wx, y: wy }); elev = typeof r === "number" ? r : (r && r.z) || 0; } catch (e) {}
+      const above = document.getElementById("np_above").checked;
+      const z = above ? elev : elev - LEVELS * H;
+
+      await Forma.proposal.addElement({
+        urn, name: "PARKADE P1-P6 (native plans)",
+        transform: [c, s, 0, 0, -s, c, 0, 0, 0, 0, 1, 0, ox, oy, z, 1],
+      });
+
+      const stalls = Math.floor(W / STALL) + Math.floor((D - 3 - S) / STALL) + Math.floor((D - 6 - S) / STALL);
+      const loop = 2 * ((W - 2 * S - A) + (D - S - A));
+      out("Built: " + LEVELS + " levels x " + H + " m, " + (above ? "ABOVE ground" : "BELOW ground"));
+      out("Floor: " + W.toFixed(1) + " x " + D.toFixed(1) + " m");
+      out("Stalls/level approx: " + stalls + " (before columns)");
+      out("Ramp loop: " + loop.toFixed(0) + " m, slope " + (100 * H / loop).toFixed(1) + "%");
+    } catch (e) { out("ERROR: " + e.message); }
+  };
+})();
 </body>
 </html>
