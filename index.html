@@ -10,25 +10,29 @@
   .box { border: 1px solid #d9e2ec; border-radius: 6px; padding: 10px; margin-bottom: 12px; }
   label { display: block; margin: 8px 0 2px; font-weight: bold; }
   input, select { width: 100%; padding: 6px; box-sizing: border-box; }
+  input[type=checkbox] { width: auto; }
+  .chk label { display: inline-block; font-weight: normal; margin-right: 10px; }
   .row { display: flex; gap: 6px; }
+  .row > div { flex: 1; }
   button { width: 100%; margin-top: 12px; padding: 10px; background: #186faf; color: #fff;
            border: 0; border-radius: 4px; font-size: 14px; cursor: pointer; }
-  button:disabled { background: #9aa5b1; cursor: default; }
+  button.sec { background: #e3edf7; color: #186faf; margin-top: 6px; padding: 8px; font-size: 13px; }
+  button:disabled { background: #9aa5b1; color: #fff; cursor: default; }
   .info { background: #f0f4f8; padding: 8px; border-radius: 4px; white-space: pre-wrap; font-size: 12px; }
   #status { margin-top: 10px; white-space: pre-wrap; }
   .hidden { display: none; }
+  svg { width: 100%; background: #fff; border: 1px solid #d9e2ec; margin-top: 8px; }
 </style>
 </head>
 <body>
 <h3>Massing Generator</h3>
 <div class="info" id="info">Connecting to Forma...</div>
 
+<!-- ================= 1. SITE BOUNDARY ================= -->
 <div class="box">
   <h4>1. Site boundary from survey (DXF)</h4>
-
   <label>Survey file (.dxf)</label>
   <input type="file" id="file" accept=".dxf">
-
   <label>Drawing units</label>
   <select id="units">
     <option value="auto">Auto (read from file)</option>
@@ -38,28 +42,66 @@
     <option value="0.3048006096">US survey feet</option>
     <option value="0.001">Millimetres</option>
   </select>
-
   <label>Boundary (closed polylines found)</label>
   <select id="poly"><option>-- load a DXF file first --</option></select>
-
   <label>Placement</label>
   <select id="mode">
     <option value="geo">Use survey coordinates (georeferenced)</option>
     <option value="click">Click on map to place (local / assumed coordinates)</option>
   </select>
-
   <div id="clickOpts" class="hidden">
     <label>Rotation (degrees, counter-clockwise)</label>
     <input id="rot" type="number" value="0">
   </div>
-
   <label>Fine shift X / Y (m)</label>
+  <div class="row"><input id="dx" type="number" value="0"><input id="dy" type="number" value="0"></div>
+  <button id="draw" disabled>Draw boundary in Forma</button>
+</div>
+
+<!-- ================= 2. PARKADE + CORE ================= -->
+<div class="box" id="park">
+  <h4>2. Parkade + core (480 Robson logic)</h4>
+  <button class="sec" id="readSite">Read site limit from Forma</button>
+  <button class="sec" id="pickSite">Or: click site corners on map</button>
+  <button class="sec" id="useStep1">Or: use boundary from step 1</button>
+
   <div class="row">
-    <input id="dx" type="number" value="0">
-    <input id="dy" type="number" value="0">
+    <div><label>Parking levels</label><input id="nLev" type="number" value="6"></div>
+    <div><label>Floor-to-floor (m)</label><input id="ftf" type="number" value="2.75" step="0.05"></div>
+  </div>
+  <div class="row">
+    <div><label>Stall width (m)</label><input id="sw" type="number" value="2.5" step="0.05"></div>
+    <div><label>Stall depth (m)</label><input id="sd" type="number" value="5.5" step="0.1"></div>
+  </div>
+  <div class="row">
+    <div><label>Drive aisle (m)</label><input id="aisle" type="number" value="6.7" step="0.1"></div>
+    <div><label>Perimeter wall (m)</label><input id="wall" type="number" value="0.3" step="0.05"></div>
+  </div>
+  <div class="row">
+    <div><label>Core length (m)</label><input id="cl" type="number" value="9.0" step="0.1"></div>
+    <div><label>Core width (m)</label><input id="cw" type="number" value="6.6" step="0.1"></div>
+  </div>
+  <div class="row">
+    <div><label>Tower floors above grade</label><input id="tn" type="number" value="19"></div>
+    <div><label>Tower floor-to-floor (m)</label><input id="tf" type="number" value="2.8" step="0.05"></div>
   </div>
 
-  <button id="draw" disabled>Draw boundary in Forma</button>
+  <label>Stall rows along sides (see plan)</label>
+  <div class="chk">
+    <label><input type="checkbox" id="sS1" checked> Bottom</label>
+    <label><input type="checkbox" id="sS2" checked> Top</label>
+    <label><input type="checkbox" id="sE1" checked> Left</label>
+    <label><input type="checkbox" id="sE2" checked> Right</label>
+  </div>
+  <button class="sec" id="autoB">Auto: maximum stalls</button>
+
+  <div id="svgwrap"></div>
+  <div class="info" id="pinfo">No site yet. Use one of the buttons above.</div>
+
+  <div class="chk" style="margin-top:8px">
+    <label><input type="checkbox" id="above"> Preview above ground (easier to see)</label>
+  </div>
+  <button id="build" disabled>Build parkade + core in Forma</button>
 </div>
 
 <div id="status"></div>
@@ -70,91 +112,80 @@ import { Forma } from "https://esm.sh/forma-embedded-view-sdk@0.x/auto";
 const $ = (id) => document.getElementById(id);
 const log = (t) => ($("status").textContent = t);
 
-let project = null;
-let polys = [];
-let fileUnits = 1;
-let fileUnitsName = "metres (assumed)";
+let project = null, polys = [], fileUnits = 1, fileUnitsName = "metres (assumed)";
+let lastWorld = null;   // boundary drawn in step 1
+let siteWorld = null;   // site polygon used for parkade
+let current = null;     // current parkade layout
 
 // ---------- Connect ----------
 try {
   project = await Forma.project.get();
   const canEdit = await Forma.getCanEdit();
   $("info").textContent =
-    "Project: " + project.name +
-    "\nCoordinate system: EPSG:" + project.srid +
+    "Project: " + project.name + "\nCoordinate system: EPSG:" + project.srid +
     "\nReference point: " + project.refPoint[0].toFixed(2) + ", " + project.refPoint[1].toFixed(2) +
     "\nEdit access: " + (canEdit ? "YES" : "NO");
-} catch (e) {
-  $("info").textContent = "Not connected to Forma: " + e.message;
-}
+} catch (e) { $("info").textContent = "Not connected to Forma: " + e.message; }
 
-$("mode").onchange = () =>
-  $("clickOpts").classList.toggle("hidden", $("mode").value !== "click");
+$("mode").onchange = () => $("clickOpts").classList.toggle("hidden", $("mode").value !== "click");
 
 // ---------- Geometry helpers ----------
-function signedArea(p) {
-  let a = 0;
-  for (let i = 0; i < p.length; i++) {
-    const [x1, y1] = p[i], [x2, y2] = p[(i + 1) % p.length];
-    a += x1 * y2 - x2 * y1;
+function signedArea(p) { let a = 0; for (let i = 0; i < p.length; i++) { const [x1, y1] = p[i], [x2, y2] = p[(i + 1) % p.length]; a += x1 * y2 - x2 * y1; } return a / 2; }
+function perimeter(p) { let s = 0; for (let i = 0; i < p.length; i++) { const [x1, y1] = p[i], [x2, y2] = p[(i + 1) % p.length]; s += Math.hypot(x2 - x1, y2 - y1); } return s; }
+function centroid(p) { let x = 0, y = 0; p.forEach((q) => { x += q[0]; y += q[1]; }); return [x / p.length, y / p.length]; }
+function unitFactor() { return $("units").value === "auto" ? fileUnits : Number($("units").value); }
+function cleanPoly(pts) {
+  pts = pts.filter((p) => isFinite(p[0]) && isFinite(p[1]));
+  if (pts.length > 2) { const f = pts[0], l = pts[pts.length - 1]; if (Math.hypot(f[0] - l[0], f[1] - l[1]) < 0.01) pts.pop(); }
+  if (signedArea(pts) < 0) pts.reverse();
+  return pts;
+}
+async function terrainZ(points, mode) {
+  const vals = [];
+  for (const [x, y] of points) {
+    try { const h = await Forma.terrain.getElevationAt({ x, y }); if (typeof h === "number" && isFinite(h)) vals.push(h); } catch (e) {}
   }
-  return a / 2;
+  if (!vals.length) return 0;
+  if (mode === "max") return Math.max(...vals);
+  if (mode === "min") return Math.min(...vals);
+  return vals.reduce((a, b) => a + b, 0) / vals.length;
 }
-function perimeter(p) {
-  let s = 0;
-  for (let i = 0; i < p.length; i++) {
-    const [x1, y1] = p[i], [x2, y2] = p[(i + 1) % p.length];
-    s += Math.hypot(x2 - x1, y2 - y1);
-  }
-  return s;
-}
-function centroid(p) {
-  let x = 0, y = 0;
-  p.forEach((q) => { x += q[0]; y += q[1]; });
-  return [x / p.length, y / p.length];
-}
-function unitFactor() {
-  return $("units").value === "auto" ? fileUnits : Number($("units").value);
+async function addStack(worldPoly, floorHeights, z, name) {
+  const w = cleanPoly(worldPoly.map((p) => [...p]));
+  const c = centroid(w);
+  const rel = w.map(([x, y]) => [x - c[0], y - c[1]]);
+  rel.push([...rel[0]]);
+  const { urn } = await Forma.elements.floorStack.createFromFloors({
+    floors: floorHeights.map((h) => ({ polygon: rel, height: h })),
+  });
+  await Forma.proposal.addElement({ urn, transform: [1,0,0,0, 0,1,0,0, 0,0,1,0, c[0], c[1], z, 1], name });
 }
 
-// ---------- DXF parser (LWPOLYLINE + POLYLINE) ----------
+// ---------- DXF parser ----------
 function parseDxf(text) {
-  const lines = text.split(/\r?\n/);
-  const pairs = [];
-  for (let i = 0; i + 1 < lines.length; i += 2)
-    pairs.push([parseInt(lines[i].trim(), 10), lines[i + 1].trim()]);
-
+  const lines = text.split(/\r?\n/), pairs = [];
+  for (let i = 0; i + 1 < lines.length; i += 2) pairs.push([parseInt(lines[i].trim(), 10), lines[i + 1].trim()]);
   let insunits = 0;
-  for (let i = 0; i < pairs.length - 1; i++) {
-    if (pairs[i][0] === 9 && pairs[i][1] === "$INSUNITS") { insunits = parseInt(pairs[i + 1][1], 10); break; }
-  }
-
-  const out = [];
-  let inEntities = false;
+  for (let i = 0; i < pairs.length - 1; i++) if (pairs[i][0] === 9 && pairs[i][1] === "$INSUNITS") { insunits = parseInt(pairs[i + 1][1], 10); break; }
+  const out = []; let inEnt = false;
   for (let i = 0; i < pairs.length; i++) {
     const [c, v] = pairs[i];
-    if (c === 2 && v === "ENTITIES") { inEntities = true; continue; }
-    if (inEntities && c === 0 && v === "ENDSEC") inEntities = false;
-    if (!inEntities || c !== 0) continue;
-
+    if (c === 2 && v === "ENTITIES") { inEnt = true; continue; }
+    if (inEnt && c === 0 && v === "ENDSEC") inEnt = false;
+    if (!inEnt || c !== 0) continue;
     if (v === "LWPOLYLINE") {
       let layer = "0", flags = 0, pts = [], arcs = false, j = i + 1;
       for (; j < pairs.length && pairs[j][0] !== 0; j++) {
         const [cc, vv] = pairs[j];
-        if (cc === 8) layer = vv;
-        else if (cc === 70) flags = parseInt(vv, 10);
+        if (cc === 8) layer = vv; else if (cc === 70) flags = parseInt(vv, 10);
         else if (cc === 10) pts.push([parseFloat(vv), 0]);
         else if (cc === 20 && pts.length) pts[pts.length - 1][1] = parseFloat(vv);
         else if (cc === 42 && parseFloat(vv) !== 0) arcs = true;
       }
-      out.push({ layer, closed: (flags & 1) === 1, pts, arcs });
-      i = j - 1;
+      out.push({ layer, closed: (flags & 1) === 1, pts, arcs }); i = j - 1;
     } else if (v === "POLYLINE") {
       let layer = "0", flags = 0, pts = [], arcs = false, j = i + 1;
-      for (; j < pairs.length && pairs[j][0] !== 0; j++) {
-        if (pairs[j][0] === 8) layer = pairs[j][1];
-        if (pairs[j][0] === 70) flags = parseInt(pairs[j][1], 10);
-      }
+      for (; j < pairs.length && pairs[j][0] !== 0; j++) { if (pairs[j][0] === 8) layer = pairs[j][1]; if (pairs[j][0] === 70) flags = parseInt(pairs[j][1], 10); }
       while (j < pairs.length && !(pairs[j][0] === 0 && pairs[j][1] === "SEQEND")) {
         if (pairs[j][0] === 0 && pairs[j][1] === "VERTEX") {
           let x = null, y = null, k = j + 1;
@@ -163,139 +194,236 @@ function parseDxf(text) {
             if (pairs[k][0] === 20) y = parseFloat(pairs[k][1]);
             if (pairs[k][0] === 42 && parseFloat(pairs[k][1]) !== 0) arcs = true;
           }
-          if (x !== null && y !== null) pts.push([x, y]);
-          j = k;
+          if (x !== null && y !== null) pts.push([x, y]); j = k;
         } else j++;
       }
-      if (!(flags & 16) && !(flags & 64))
-        out.push({ layer, closed: (flags & 1) === 1, pts, arcs });
+      if (!(flags & 16) && !(flags & 64)) out.push({ layer, closed: (flags & 1) === 1, pts, arcs });
       i = j;
     }
   }
   return { insunits, polylines: out };
 }
+const UNITS = { 0: [1, "unitless - assumed metres"], 1: [0.0254, "inches"], 2: [0.3048, "feet"], 4: [0.001, "millimetres"], 5: [0.01, "centimetres"], 6: [1, "metres"], 21: [1200 / 3937, "US survey feet"] };
 
-const UNITS = {
-  0: [1, "unitless - assumed metres"], 1: [0.0254, "inches"], 2: [0.3048, "feet"],
-  4: [0.001, "millimetres"], 5: [0.01, "centimetres"], 6: [1, "metres"],
-  21: [1200 / 3937, "US survey feet"],
-};
-
-// ---------- Load file ----------
 $("file").onchange = async (ev) => {
-  const f = ev.target.files[0];
-  if (!f) return;
+  const f = ev.target.files[0]; if (!f) return;
   try {
     const text = await f.text();
     if (!text.includes("ENTITIES")) throw new Error("This does not look like an ASCII DXF file.");
     const { insunits, polylines } = parseDxf(text);
     [fileUnits, fileUnitsName] = UNITS[insunits] || [1, "unknown - assumed metres"];
-
-    polys = polylines
-      .map((p) => {
-        let pts = p.pts.slice();
-        const first = pts[0], last = pts[pts.length - 1];
-        let closed = p.closed;
-        if (pts.length > 2 && Math.hypot(first[0] - last[0], first[1] - last[1]) < 1e-6) {
-          pts.pop(); closed = true;
-        }
-        return { ...p, pts, closed };
-      })
-      .filter((p) => p.closed && p.pts.length >= 3);
-
+    polys = polylines.map((p) => {
+      let pts = p.pts.slice(), closed = p.closed;
+      const a = pts[0], b = pts[pts.length - 1];
+      if (pts.length > 2 && Math.hypot(a[0] - b[0], a[1] - b[1]) < 1e-6) { pts.pop(); closed = true; }
+      return { ...p, pts, closed };
+    }).filter((p) => p.closed && p.pts.length >= 3);
     polys.forEach((p) => (p.areaRaw = Math.abs(signedArea(p.pts))));
     polys.sort((a, b) => b.areaRaw - a.areaRaw);
-
     const fct = unitFactor();
     $("poly").innerHTML = polys.length
-      ? polys.map((p, i) =>
-          `<option value="${i}">${i + 1}. Layer "${p.layer}" - ${p.pts.length} pts - ` +
-          `${(p.areaRaw * fct * fct).toFixed(1)} m2${p.arcs ? " (arcs straightened)" : ""}</option>`).join("")
+      ? polys.map((p, i) => `<option value="${i}">${i + 1}. Layer "${p.layer}" - ${p.pts.length} pts - ${(p.areaRaw * fct * fct).toFixed(1)} m2${p.arcs ? " (arcs straightened)" : ""}</option>`).join("")
       : "<option>No closed polylines found</option>";
     $("draw").disabled = polys.length === 0;
-
     const c = polys.length ? centroid(polys[0].pts) : [0, 0];
-    log(`Loaded "${f.name}"\nUnits in file: ${fileUnitsName}\n` +
-        `Closed polylines found: ${polys.length} (of ${polylines.length} polylines)\n` +
-        `Largest boundary centre: ${c[0].toFixed(2)}, ${c[1].toFixed(2)}`);
-  } catch (e) {
-    log("Could not read file: " + e.message);
-  }
+    log(`Loaded "${f.name}"\nUnits in file: ${fileUnitsName}\nClosed polylines found: ${polys.length} (of ${polylines.length})\nLargest boundary centre: ${c[0].toFixed(2)}, ${c[1].toFixed(2)}`);
+  } catch (e) { log("Could not read file: " + e.message); }
 };
 $("units").onchange = () => $("file").onchange({ target: $("file") });
 
-// ---------- Draw ----------
 $("draw").onclick = async () => {
   const btn = $("draw");
   try {
     btn.disabled = true;
-    const p = polys[Number($("poly").value)];
-    const f = unitFactor();
+    const p = polys[Number($("poly").value)], f = unitFactor();
     const dx = Number($("dx").value), dy = Number($("dy").value);
     const pts = p.pts.map(([x, y]) => [x * f, y * f]);
     let world;
-
     if ($("mode").value === "geo") {
       const [rx, ry] = project.refPoint;
       world = pts.map(([x, y]) => [x - rx + dx, y - ry + dy]);
-      const c = centroid(world);
-      const dist = Math.hypot(c[0], c[1]);
-      if (dist > 5000 && !confirm(
-          `The boundary is ${(dist / 1000).toFixed(1)} km from the project location.\n` +
-          `The survey is probably in a different coordinate system than the Forma project (EPSG:${project.srid}).\n\nDraw anyway?`)) {
-        log("Cancelled."); return;
-      }
+      const c = centroid(world), dist = Math.hypot(c[0], c[1]);
+      if (dist > 5000 && !confirm(`The boundary is ${(dist / 1000).toFixed(1)} km from the project location.\nThe survey is probably in a different coordinate system than the Forma project (EPSG:${project.srid}).\n\nDraw anyway?`)) { log("Cancelled."); return; }
     } else {
-      const c = centroid(pts);
-      const a = (Number($("rot").value) * Math.PI) / 180;
+      const c = centroid(pts), a = (Number($("rot").value) * Math.PI) / 180;
       log("Click on the map where the CENTRE of the site should go...");
       const pt = await Forma.designTool.getPoint();
       if (!pt) { log("Cancelled."); return; }
-      world = pts.map(([x, y]) => {
-        const X = x - c[0], Y = y - c[1];
-        return [X * Math.cos(a) - Y * Math.sin(a) + pt.x + dx,
-                X * Math.sin(a) + Y * Math.cos(a) + pt.y + dy];
-      });
+      world = pts.map(([x, y]) => { const X = x - c[0], Y = y - c[1];
+        return [X * Math.cos(a) - Y * Math.sin(a) + pt.x + dx, X * Math.sin(a) + Y * Math.cos(a) + pt.y + dy]; });
     }
+    world = cleanPoly(world);
+    lastWorld = world.map((q) => [...q]);
+    const z = (await terrainZ([...world, centroid(world)], "max")) + 1.5;
+    await addStack(world, [0.5], z, "SURVEY BOUNDARY - reference (delete after use)");
+    log(`Done! Survey boundary drawn.\nArea: ${Math.abs(signedArea(world)).toFixed(1)} m2\nPerimeter: ${perimeter(world).toFixed(1)} m\nVertices: ${world.length}\n\nNext: draw the site limit on top of it, then delete the plate.`);
+  } catch (e) { log("Error: " + e.message); }
+  finally { btn.disabled = polys.length === 0; }
+};
 
-    if (signedArea(world) < 0) world.reverse();
-    const c = centroid(world);
-    const rel = world.map(([x, y]) => [x - c[0], y - c[1]]);
-    rel.push([...rel[0]]);
-
-    // Terrain: highest point under the boundary + lift
-    const LIFT = 1.5;
-    let z = 0, gotTerrain = false;
-    for (const [x, y] of [...world, c]) {
-      try {
-        const h = await Forma.terrain.getElevationAt({ x, y });
-        if (typeof h === "number" && isFinite(h)) {
-          z = gotTerrain ? Math.max(z, h) : h;
-          gotTerrain = true;
-        }
-      } catch (e) {}
-    }
-    z += LIFT;
-
-    const { urn } = await Forma.elements.floorStack.createFromFloors({
-      floors: [{ polygon: rel, height: 0.5 }],
-    });
-    await Forma.proposal.addElement({
-      urn,
-      transform: [1,0,0,0, 0,1,0,0, 0,0,1,0, c[0], c[1], z, 1],
-      name: "SURVEY BOUNDARY - reference (delete after use)",
-    });
-
-    log(`Done! Survey boundary drawn.\n` +
-        `Area: ${Math.abs(signedArea(world)).toFixed(1)} m2\n` +
-        `Perimeter: ${perimeter(world).toFixed(1)} m\n` +
-        `Vertices: ${world.length}\n\n` +
-        `Next: Draw site limit > Pick > click the thin plate.\nThen delete the plate.`);
-  } catch (e) {
-    log("Error: " + e.message);
-  } finally {
-    btn.disabled = polys.length === 0;
+// =====================================================================
+// 2. PARKADE + CORE
+// =====================================================================
+function toPts(raw) {
+  // Accepts: [{x,y}], [[x,y,(z)]], flat [x,y,z,x,y,z...]
+  if (!raw) return [];
+  if (raw.length && typeof raw[0] === "number") {
+    const out = []; for (let i = 0; i + 2 < raw.length + 1; i += 3) out.push([raw[i], raw[i + 1]]); return out;
   }
+  return Array.from(raw).map((p) => (Array.isArray(p) || ArrayBuffer.isView(p)) ? [p[0], p[1]] : [p.x, p.y]);
+}
+function setSite(pts, source) {
+  pts = cleanPoly(pts);
+  if (pts.length < 3) { log("Site polygon not valid (" + source + ")."); return; }
+  siteWorld = pts;
+  log(`Site loaded from ${source}.\nArea: ${Math.abs(signedArea(pts)).toFixed(1)} m2, vertices: ${pts.length}`);
+  autoSides();
+}
+
+$("readSite").onclick = async () => {
+  try {
+    const res = await Forma.geometry.getPathsByCategory({ category: "site_limit" });
+    const paths = (res || []).map(toPts).filter((p) => p.length >= 3);
+    if (!paths.length) throw new Error("No site limit found in this proposal.");
+    paths.sort((a, b) => Math.abs(signedArea(b)) - Math.abs(signedArea(a)));
+    setSite(paths[0], "Forma site limit");
+  } catch (e) { log("Could not read site limit: " + e.message + "\nUse 'click site corners on map' instead."); }
+};
+$("pickSite").onclick = async () => {
+  try {
+    log("Click each site corner on the map (snap to the corners). Close the shape on the first corner.");
+    const res = await Forma.designTool.getPolygon();
+    if (!res) { log("Cancelled."); return; }
+    setSite(toPts(res), "map clicks");
+  } catch (e) { log("Error: " + e.message); }
+};
+$("useStep1").onclick = () => {
+  if (!lastWorld) { log("No boundary from step 1 in this session. Use one of the other buttons."); return; }
+  setSite(lastWorld, "step 1 boundary");
+};
+
+function params() {
+  const g = (id) => Number($(id).value);
+  return { t: g("wall"), D: g("sd"), Wst: g("sw"), A: g("aisle"), cl: g("cl"), cw: g("cw"),
+           sides: { S1: $("sS1").checked, S2: $("sS2").checked, E1: $("sE1").checked, E2: $("sE2").checked } };
+}
+
+function layout(world, P) {
+  const c = centroid(world);
+  let best = 0, th = 0;
+  for (let i = 0; i < world.length; i++) {
+    const [x1, y1] = world[i], [x2, y2] = world[(i + 1) % world.length];
+    const L = Math.hypot(x2 - x1, y2 - y1); if (L > best) { best = L; th = Math.atan2(y2 - y1, x2 - x1); }
+  }
+  const cs = Math.cos(-th), sn = Math.sin(-th);
+  const loc = world.map(([x, y]) => { const X = x - c[0], Y = y - c[1]; return [X * cs - Y * sn, X * sn + Y * cs]; });
+  const us = loc.map((p) => p[0]), vs = loc.map((p) => p[1]);
+  const minU = Math.min(...us), maxU = Math.max(...us), minV = Math.min(...vs), maxV = Math.max(...vs);
+  const rectRatio = Math.abs(signedArea(loc)) / ((maxU - minU) * (maxV - minV));
+  const { t, D, Wst, A, cl, cw, sides } = P;
+  const u0 = minU + t, u1 = maxU - t, v0 = minV + t, v1 = maxV - t;
+  const inner = [u0 + (sides.E1 ? D : 0), v0 + (sides.S1 ? D : 0), u1 - (sides.E2 ? D : 0), v1 - (sides.S2 ? D : 0)];
+  const isl = [inner[0] + A, inner[1] + A, inner[2] - A, inner[3] - A];
+  const iw = isl[2] - isl[0], ih = isl[3] - isl[1];
+  const R = { th, c, loc, minU, maxU, minV, maxV, rectRatio, u0, u1, v0, v1, inner, isl, stalls: [], corners: [], ok: true, msg: "" };
+  R.toWorld = ([u, v]) => { const ca = Math.cos(th), sa = Math.sin(th); return [u * ca - v * sa + c[0], u * sa + v * ca + c[1]]; };
+  if (iw < cl || ih < cw) { R.ok = false; R.msg = `Core (${cl} x ${cw} m) does not fit in the middle island (${iw.toFixed(1)} x ${ih.toFixed(1)} m). Turn off a stall row or press Auto.`; return R; }
+  const cu = (isl[0] + isl[2]) / 2, cv = (isl[1] + isl[3]) / 2;
+  R.core = [cu - cl / 2, cv - cw / 2, cu + cl / 2, cv + cw / 2];
+  const row = (ua, ub, va, vb, alongU) => {
+    const len = alongU ? ub - ua : vb - va, n = Math.floor(len / Wst + 1e-6);
+    for (let k = 0; k < n; k++) R.stalls.push(alongU ? [ua + k * Wst, va, ua + (k + 1) * Wst, vb] : [ua, va + k * Wst, ub, va + (k + 1) * Wst]);
+  };
+  if (sides.S1) row(inner[0], inner[2], v0, v0 + D, true);
+  if (sides.S2) row(inner[0], inner[2], v1 - D, v1, true);
+  if (sides.E1) row(u0, u0 + D, inner[1], inner[3], false);
+  if (sides.E2) row(u1 - D, u1, inner[1], inner[3], false);
+  const gU = (iw - cl) / 2, gV = (ih - cw) / 2;
+  if (gU >= D) { row(isl[0], isl[0] + D, isl[1], isl[3], false); row(isl[2] - D, isl[2], isl[1], isl[3], false); }
+  if (gV >= D) { const a = isl[0] + (gU >= D ? D : 0), b = isl[2] - (gU >= D ? D : 0); row(a, b, isl[1], isl[1] + D, true); row(a, b, isl[3] - D, isl[3], true); }
+  if (sides.S1 && sides.E1) R.corners.push([u0, v0, u0 + D, v0 + D]);
+  if (sides.S1 && sides.E2) R.corners.push([u1 - D, v0, u1, v0 + D]);
+  if (sides.S2 && sides.E1) R.corners.push([u0, v1 - D, u0 + D, v1]);
+  if (sides.S2 && sides.E2) R.corners.push([u1 - D, v1 - D, u1, v1]);
+  R.loop = 2 * ((inner[2] - inner[0] - A) + (inner[3] - inner[1] - A));
+  return R;
+}
+
+function autoSides() {
+  if (!siteWorld) return;
+  const P = params(); let best = null;
+  for (let m = 0; m < 16; m++) {
+    const sides = { S1: !!(m & 1), S2: !!(m & 2), E1: !!(m & 4), E2: !!(m & 8) };
+    const L = layout(siteWorld, { ...P, sides });
+    if (L.ok && (!best || L.stalls.length > best.n)) best = { n: L.stalls.length, sides };
+  }
+  if (best) { $("sS1").checked = best.sides.S1; $("sS2").checked = best.sides.S2; $("sE1").checked = best.sides.E1; $("sE2").checked = best.sides.E2; }
+  recompute();
+}
+$("autoB").onclick = autoSides;
+document.querySelectorAll("#park input").forEach((i) => { if (i.id !== "above") i.oninput = recompute; });
+
+function drawSvg(L) {
+  const W = 300, pad = 8, s = (W - 2 * pad) / (L.maxU - L.minU);
+  const Hpx = (L.maxV - L.minV) * s + 2 * pad;
+  const X = (u) => (u - L.minU) * s + pad, Y = (v) => (L.maxV - v) * s + pad;
+  const rect = (r, fill, stroke, sw = 0.6, dash = "") =>
+    `<rect x="${X(r[0])}" y="${Y(r[3])}" width="${(r[2] - r[0]) * s}" height="${(r[3] - r[1]) * s}" fill="${fill}" stroke="${stroke}" stroke-width="${sw}" ${dash ? `stroke-dasharray="${dash}"` : ""}/>`;
+  let g = `<polygon points="${L.loc.map(([u, v]) => X(u) + "," + Y(v)).join(" ")}" fill="#f7f9fb" stroke="#333" stroke-width="1.5"/>`;
+  g += rect([L.inner[0], L.inner[1], L.inner[2], L.inner[3]], "#eef3f8", "none");
+  L.corners.forEach((r) => (g += rect(r, "#d9d9d9", "#999")));
+  L.stalls.forEach((r) => (g += rect(r, "#fff", "#186faf")));
+  g += rect(L.isl, "none", "#999", 0.8, "4,3");
+  if (L.core) g += rect(L.core, "#555", "#222") +
+    `<text x="${X((L.core[0] + L.core[2]) / 2)}" y="${Y((L.core[1] + L.core[3]) / 2) + 4}" font-size="11" fill="#fff" text-anchor="middle">CORE</text>`;
+  const n = [Math.sin(L.th), Math.cos(L.th)];
+  const ax = W - 22, ay = 26;
+  g += `<line x1="${ax}" y1="${ay}" x2="${ax + n[0] * 16}" y2="${ay - n[1] * 16}" stroke="#c00" stroke-width="2"/>
+        <text x="${ax + n[0] * 22}" y="${ay - n[1] * 22 + 4}" font-size="11" fill="#c00" text-anchor="middle">N</text>`;
+  g += `<text x="${W / 2}" y="${Hpx - 1}" font-size="10" text-anchor="middle" fill="#666">Bottom</text>
+        <text x="${W / 2}" y="9" font-size="10" text-anchor="middle" fill="#666">Top</text>`;
+  $("svgwrap").innerHTML = `<svg viewBox="0 0 ${W} ${Hpx + 2}">${g}</svg>`;
+}
+
+function recompute() {
+  if (!siteWorld) return;
+  current = layout(siteWorld, params());
+  const L = current, N = Number($("nLev").value), ftf = Number($("ftf").value);
+  drawSvg(L);
+  if (!L.ok) { $("pinfo").textContent = L.msg; $("build").disabled = true; return; }
+  const slope = (ftf / L.loop) * 100;
+  $("pinfo").textContent =
+    `Site (oriented): ${(L.maxU - L.minU).toFixed(1)} x ${(L.maxV - L.minV).toFixed(1)} m` +
+    (L.rectRatio < 0.95 ? `\nWARNING: site is not rectangular (${(L.rectRatio * 100).toFixed(0)}% of its box). Layout uses the box - check.` : "") +
+    `\nStalls per level: ${L.stalls.length}  (x ${N} levels = ${L.stalls.length * N})` +
+    `\nColumns not modelled: expect about 10-15% fewer.` +
+    `\nRamping aisle loop: ${L.loop.toFixed(1)} m -> slope ${slope.toFixed(1)}%` +
+    (slope > 5 ? "  WARNING: above 5% (480 Robson used 5%)" : "  OK (<= 5%)") +
+    `\nGrey corners: stairs / exhaust shafts / storage (as in 480 Robson).` +
+    `\nCheck all dimensions against the current Vancouver Parking By-law.`;
+  $("build").disabled = false;
+}
+
+$("build").onclick = async () => {
+  const btn = $("build");
+  try {
+    btn.disabled = true;
+    const L = current, N = Number($("nLev").value), ftf = Number($("ftf").value);
+    const TN = Number($("tn").value), Tf = Number($("tf").value);
+    log("Building... reading terrain...");
+    const zGrade = await terrainZ([...siteWorld, centroid(siteWorld)], "avg");
+    const lift = $("above").checked ? N * ftf + 1 : 0;
+    const base = zGrade - N * ftf + lift;
+    await addStack(siteWorld, Array(N).fill(ftf), base, `PARKADE P1-P${N} (generated)`);
+    const r = L.core;
+    const coreWorld = [[r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]].map(L.toWorld);
+    const coreFloors = Array(N).fill(ftf).concat(Array(Math.max(0, TN)).fill(Tf));
+    await addStack(coreWorld, coreFloors, base, "CORE (generated)");
+    log(`Done!\nParkade: ${N} levels, top at grade ${zGrade.toFixed(2)} m` + (lift ? " (shown ABOVE ground for preview)" : "") +
+        `\nCore: ${r[2] - r[0]} x ${r[3] - r[1]} m, ${N} parking + ${TN} tower floors` +
+        `\nStalls: ${L.stalls.length} per level, ${L.stalls.length * N} total (before columns)`);
+  } catch (e) { log("Error: " + e.message); }
+  finally { btn.disabled = !(current && current.ok); }
 };
 </script>
 </body>
