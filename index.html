@@ -439,3 +439,315 @@ $("btnBuild").onclick = async () => {
 </script>
 </body>
 </html>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Massing Generator v4.1</title>
+<style>
+  body { font: 13px system-ui, sans-serif; margin: 0; padding: 10px; color: #222; }
+  .sec { border-top: 3px solid #0696d7; padding-top: 6px; margin-top: 14px; }
+  .sec.g { border-color: #0a6; }
+  .row { display: flex; gap: 6px; align-items: center; margin: 3px 0; }
+  .row span { flex: 1; }
+  input[type=number] { width: 70px; }
+  select { max-width: 180px; }
+  button { padding: 7px 10px; border: 0; border-radius: 4px; background: #0696d7; color: #fff; cursor: pointer; margin: 4px 4px 0 0; }
+  button.g { background: #0a6; }
+  button.o { background: #888; }
+  pre { white-space: pre-wrap; font-size: 12px; background: #f4f4f4; padding: 6px; max-height: 300px; overflow: auto; }
+  svg { width: 100%; background: #fafafa; border: 1px solid #ddd; margin-top: 6px; }
+  .info { color: #555; font-size: 12px; }
+</style>
+</head>
+<body>
+<b>Massing Generator v4.1</b>
+<div class="info" id="siteInfo">Site: not loaded</div>
+<button class="o" id="btnSiteLimit">Reload site limit</button>
+<button class="o" id="btnSiteSaved">Use saved DXF boundary</button>
+
+<!-- ===== 1. DXF ===== -->
+<div class="sec">
+  <b>1. DXF import (optional)</b>
+  <div class="row"><input type="file" id="dxfFile" accept=".dxf"></div>
+  <div class="row"><span>Units</span>
+    <select id="dxfUnits">
+      <option value="auto">Auto ($INSUNITS)</option>
+      <option value="m">Meters</option>
+      <option value="mm">Millimeters</option>
+      <option value="cm">Centimeters</option>
+      <option value="in" selected>Inches</option>
+      <option value="ft">Feet</option>
+    </select></div>
+  <div class="row"><span>Extra scale</span><input type="number" id="dxfScale" value="1" step="any"></div>
+  <div class="row"><span>Placement</span>
+    <select id="dxfPlace">
+      <option value="click" selected>Click a point in Forma</option>
+      <option value="geo">Geo (UTM coordinates)</option>
+    </select></div>
+  <div class="row"><span>Rotation (deg)</span><input type="number" id="dxfRot" value="0" step="any"></div>
+  <div class="row"><span>Ref X / Y (geo only)</span><input type="number" id="refX" value="491409.55" step="any"><input type="number" id="refY" value="5458542.02" step="any"></div>
+  <button id="btnDxf">Draw DXF + use as site</button>
+  <button class="o" id="btnDxfClear">Clear DXF lines</button>
+</div>
+
+<!-- ===== 2. PARKADE ===== -->
+<div class="sec g">
+  <b>2. Underground parkade (480 Robson logic)</b>
+  <div class="row"><span>Levels</span><input type="number" id="levels" value="6"></div>
+  <div class="row"><span>Floor-to-floor (m)</span><input type="number" id="ftf" value="2.75" step="0.05"></div>
+  <div class="row"><span>Min stall width (m)</span><input type="number" id="sw" value="2.5" step="0.1"></div>
+  <div class="row"><span>Stall length (m)</span><input type="number" id="sl" value="5.5" step="0.1"></div>
+  <div class="row"><span>Aisle / ramp width (m)</span><input type="number" id="aisle" value="6.7" step="0.1"></div>
+  <div class="row"><span>Wall inset (m)</span><input type="number" id="wall" value="0.3" step="0.05"></div>
+  <div class="row"><span>Core W x D (m)</span><input type="number" id="cw" value="9" step="0.1"><input type="number" id="cd" value="6.6" step="0.1"></div>
+  <div class="row"><span>Exit stair depth (m)</span><input type="number" id="stD" value="6" step="0.1"></div>
+  <div class="row"><span>Exhaust shaft depth (m)</span><input type="number" id="shD" value="3" step="0.1"></div>
+  <div class="row"><span>Entry side (no stalls)</span>
+    <select id="entry">
+      <option value="0" selected>Side opposite longest edge</option>
+      <option value="2">Longest edge</option>
+      <option value="1">Short edge A</option>
+      <option value="3">Short edge B</option>
+    </select></div>
+  <div class="row"><span>Stair / shaft corners</span>
+    <select id="mirror">
+      <option value="0" selected>Stair right, shaft left</option>
+      <option value="1">Stair left, shaft right (mirror)</option>
+    </select></div>
+  <div class="row"><span>Plan detail</span>
+    <select id="mode">
+      <option value="stalls" selected>Individual stalls</option>
+      <option value="bands">Parking bands (simple)</option>
+    </select></div>
+  <div class="row"><span>Tower floors / height (m)</span><input type="number" id="towerN" value="19"><input type="number" id="towerH" value="2.8" step="0.05"></div>
+  <label><input type="checkbox" id="above"> Build above ground (preview, to look at it)</label><br>
+  <label><input type="checkbox" id="buildCore" checked> Also build core up through tower</label>
+  <svg id="svg" viewBox="0 0 10 10"></svg>
+  <div class="info" id="stats"></div>
+  <button class="g" id="btnBuild">Build parkade with plans</button>
+</div>
+
+<pre id="log"></pre>
+
+<script type="module">
+import { Forma } from "https://esm.sh/forma-embedded-view-sdk@0.x/auto";
+
+// ---------- helpers ----------
+const $ = (id) => document.getElementById(id);
+const num = (id) => parseFloat($(id).value);
+const log = (t) => { const l = $("log"); l.textContent += t + "\n"; l.scrollTop = 1e9; };
+const area = (p) => { let s = 0; for (let i = 0; i < p.length; i++) { const a = p[i], b = p[(i + 1) % p.length]; s += a[0] * b[1] - b[0] * a[1]; } return s / 2; };
+const cleanPoly = (pts) => {
+  let p = pts.map((q) => [+q[0], +q[1]]);
+  p = p.filter((q, i) => i === 0 || Math.hypot(q[0] - p[i - 1][0], q[1] - p[i - 1][1]) > 1e-6);
+  if (p.length > 1 && Math.hypot(p[0][0] - p[p.length - 1][0], p[0][1] - p[p.length - 1][1]) < 1e-6) p.pop();
+  if (area(p) < 0) p.reverse();
+  return p;
+};
+let PID = "default";
+try { PID = Forma.getProjectId() || PID; } catch (e) {}
+const KEY = "mg_site_" + PID;
+
+// ---------- site ----------
+let SITE = null;
+function setSite(pts, src) {
+  SITE = cleanPoly(pts);
+  $("siteInfo").textContent = "Site (" + src + "): " + Math.abs(area(SITE)).toFixed(0) + " m2, " + SITE.length + " points";
+  log("Site loaded from " + src + ": " + Math.abs(area(SITE)).toFixed(0) + " m2");
+  recompute();
+}
+
+async function readSiteLimit() {
+  try {
+    const paths = await Forma.geometry.getPathsByCategory({ category: "site_limit" });
+    let best = null, bestA = 0;
+    for (const path of paths || []) {
+      const fp = await Forma.geometry.getFootprint({ path });
+      let raw = fp && (fp.coordinates || fp.points || fp);
+      while (Array.isArray(raw) && Array.isArray(raw[0]) && Array.isArray(raw[0][0])) raw = raw[0];
+      if (!Array.isArray(raw)) continue;
+      const pts = raw.map((q) => (Array.isArray(q) ? [q[0], q[1]] : [q.x, q.y]));
+      const a = Math.abs(area(pts));
+      if (pts.length >= 3 && a > bestA) { best = pts; bestA = a; }
+    }
+    return best;
+  } catch (e) { log("Site limit read error: " + e.message); return null; }
+}
+function readSaved() {
+  const s = localStorage.getItem(KEY);
+  return s ? JSON.parse(s) : null;
+}
+$("btnSiteLimit").onclick = async () => { const p = await readSiteLimit(); if (p) setSite(p, "Forma site limit"); else log("No site limit found in this proposal."); };
+$("btnSiteSaved").onclick = () => { const p = readSaved(); if (p) setSite(p, "saved DXF boundary"); else log("No saved DXF boundary for this project."); };
+
+// ---------- 1. DXF ----------
+const UNITS = { m: 1, mm: 0.001, cm: 0.01, in: 0.0254, ft: 0.3048 };
+const INS = { 1: 0.0254, 2: 0.3048, 4: 0.001, 5: 0.01, 6: 1 };
+
+function parseDxf(text) {
+  const L = text.split(/\r?\n/);
+  const pr = [];
+  for (let i = 0; i + 1 < L.length; i += 2) pr.push([parseInt(L[i].trim()), L[i + 1].trim()]);
+  let insunits = 0;
+  for (let k = 0; k < pr.length - 1; k++) if (pr[k][0] === 9 && pr[k][1] === "$INSUNITS") { insunits = parseInt(pr[k + 1][1]); break; }
+  const polys = [];
+  let inEnt = false;
+  for (let i = 0; i < pr.length; i++) {
+    const [c, v] = pr[i];
+    if (c === 2 && v === "ENTITIES") { inEnt = true; continue; }
+    if (c === 0 && v === "ENDSEC") inEnt = false;
+    if (!inEnt || c !== 0) continue;
+    if (v === "LWPOLYLINE") {
+      const pts = []; let closed = false, x = null, j = i + 1;
+      for (; j < pr.length && pr[j][0] !== 0; j++) {
+        const [cc, vv] = pr[j];
+        if (cc === 70) closed = (parseInt(vv) & 1) === 1;
+        else if (cc === 10) x = parseFloat(vv);
+        else if (cc === 20 && x !== null) { pts.push([x, parseFloat(vv)]); x = null; }
+      }
+      polys.push({ pts, closed }); i = j - 1;
+    } else if (v === "LINE") {
+      const a = [0, 0], b = [0, 0]; let j = i + 1;
+      for (; j < pr.length && pr[j][0] !== 0; j++) {
+        const f = parseFloat(pr[j][1]);
+        if (pr[j][0] === 10) a[0] = f; if (pr[j][0] === 20) a[1] = f;
+        if (pr[j][0] === 11) b[0] = f; if (pr[j][0] === 21) b[1] = f;
+      }
+      polys.push({ pts: [a, b], closed: false }); i = j - 1;
+    } else if (v === "POLYLINE") {
+      let closed = false, j = i + 1;
+      for (; j < pr.length && pr[j][0] !== 0; j++) if (pr[j][0] === 70) closed = (parseInt(pr[j][1]) & 1) === 1;
+      const pts = [];
+      while (j < pr.length && pr[j][0] === 0 && pr[j][1] === "VERTEX") {
+        const p = [0, 0]; j++;
+        for (; j < pr.length && pr[j][0] !== 0; j++) {
+          if (pr[j][0] === 10) p[0] = parseFloat(pr[j][1]);
+          if (pr[j][0] === 20) p[1] = parseFloat(pr[j][1]);
+        }
+        pts.push(p);
+      }
+      polys.push({ pts, closed }); i = j - 1;
+    }
+  }
+  polys.forEach((p) => {
+    const n = p.pts.length;
+    if (n > 2 && Math.hypot(p.pts[0][0] - p.pts[n - 1][0], p.pts[0][1] - p.pts[n - 1][1]) < 1e-9) p.closed = true;
+  });
+  return { polys: polys.filter((p) => p.pts.length >= 2), insunits };
+}
+
+let meshIds = [];
+async function drawLines(polys, z) {
+  const pos = [], w = 0.15;
+  for (const pl of polys) {
+    const n = pl.pts.length, segs = pl.closed ? n : n - 1;
+    for (let k = 0; k < segs; k++) {
+      const a = pl.pts[k], b = pl.pts[(k + 1) % n];
+      const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy);
+      if (L < 1e-6) continue;
+      const nx = (-dy / L) * w / 2, ny = (dx / L) * w / 2;
+      const A = [a[0] + nx, a[1] + ny], B = [a[0] - nx, a[1] - ny], C = [b[0] - nx, b[1] - ny], E = [b[0] + nx, b[1] + ny];
+      pos.push(A[0], A[1], z, B[0], B[1], z, C[0], C[1], z, A[0], A[1], z, C[0], C[1], z, E[0], E[1], z);
+    }
+  }
+  if (!pos.length) return;
+  const color = new Uint8Array((pos.length / 3) * 4);
+  for (let k = 0; k < color.length; k += 4) { color[k] = 230; color[k + 1] = 40; color[k + 2] = 40; color[k + 3] = 255; }
+  const res = await Forma.render.addMesh({ geometryData: { position: new Float32Array(pos), color } });
+  if (res && res.id) meshIds.push(res.id);
+}
+$("btnDxfClear").onclick = async () => {
+  for (const id of meshIds) { try { await Forma.render.remove({ id }); } catch (e) {} }
+  meshIds = []; log("DXF lines cleared.");
+};
+
+$("btnDxf").onclick = async () => {
+  try {
+    const file = $("dxfFile").files[0];
+    if (!file) { log("Choose a DXF file first."); return; }
+    const { polys, insunits } = parseDxf(await file.text());
+    if (!polys.length) { log("No lines/polylines found in DXF."); return; }
+    let f = $("dxfUnits").value === "auto" ? (INS[insunits] || 1) : UNITS[$("dxfUnits").value];
+    f *= num("dxfScale") || 1;
+    log("DXF: " + polys.length + " entities, unit factor " + f);
+
+    let mx = Infinity, my = Infinity, Mx = -Infinity, My = -Infinity;
+    polys.forEach((p) => p.pts.forEach((q) => { mx = Math.min(mx, q[0] * f); my = Math.min(my, q[1] * f); Mx = Math.max(Mx, q[0] * f); My = Math.max(My, q[1] * f); }));
+    const ccx = (mx + Mx) / 2, ccy = (my + My) / 2;
+    log("DXF size: " + (Mx - mx).toFixed(1) + " x " + (My - my).toFixed(1) + " m");
+
+    const rot = (num("dxfRot") || 0) * Math.PI / 180, rc = Math.cos(rot), rs = Math.sin(rot);
+    let T;
+    if ($("dxfPlace").value === "click") {
+      log("Click a point in the Forma 3D view to place the DXF centre...");
+      const p = await Forma.designTool.getPoint();
+      if (!p) { log("Cancelled."); return; }
+      T = (q) => { const x = q[0] * f - ccx, y = q[1] * f - ccy; return [p.x + x * rc - y * rs, p.y + x * rs + y * rc]; };
+    } else {
+      let rx = num("refX"), ry = num("refY");
+      try { const pj = await Forma.project.get(); if (pj && pj.refPoint) { rx = pj.refPoint[0]; ry = pj.refPoint[1]; } } catch (e) {}
+      T = (q) => [q[0] * f - rx, q[1] * f - ry];
+    }
+    const world = polys.map((p) => ({ closed: p.closed, pts: p.pts.map(T) }));
+
+    let z = 30;
+    try { const bb = await Forma.terrain.getBbox(); z = bb.max.z + 1.5; } catch (e) {}
+    try { await drawLines(world, z); log("DXF lines drawn at z = " + z.toFixed(1) + " m"); }
+    catch (e) { log("Could not draw lines: " + e.message); }
+
+    let best = null, bestA = 0;
+    world.filter((p) => p.closed && p.pts.length >= 3).forEach((p) => { const a = Math.abs(area(p.pts)); if (a > bestA) { bestA = a; best = p.pts; } });
+    if (best) {
+      localStorage.setItem(KEY, JSON.stringify(best));
+      setSite(best, "DXF largest closed polyline");
+      log("DXF boundary saved for next time.");
+    } else log("No closed polyline in DXF; site not changed.");
+  } catch (e) { log("DXF ERROR: " + e.message); }
+};
+
+// ---------- 2. PARKADE ----------
+const P = () => ({
+  N: Math.max(1, Math.round(num("levels"))), H: num("ftf"), SW: num("sw"), S: num("sl"), A: num("aisle"),
+  wall: num("wall"), CW: num("cw"), CD: num("cd"), stD: num("stD"), shD: num("shD"),
+  entry: parseInt($("entry").value), mirror: $("mirror").value === "1", mode: $("mode").value,
+  TN: Math.max(0, Math.round(num("towerN"))), TH: num("towerH"),
+});
+
+function frame(site, k) {
+  let best = 0, ang = 0;
+  for (let i = 0; i < site.length; i++) {
+    const a = site[i], b = site[(i + 1) % site.length], L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (L > best) { best = L; ang = Math.atan2(b[1] - a[1], b[0] - a[0]); }
+  }
+  ang += k * Math.PI / 2;
+  const c = Math.cos(ang), s = Math.sin(ang);
+  let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+  site.forEach((p) => { const u = p[0] * c + p[1] * s, v = -p[0] * s + p[1] * c; u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v); });
+  return { c, s, u0, u1, v0, v1 };
+}
+
+function layout() {
+  if (!SITE) return null;
+  const p = P(), fr = frame(SITE, p.entry);
+  const W = fr.u1 - fr.u0 - 2 * p.wall, D = fr.v1 - fr.v0 - 2 * p.wall;
+  const { S, SW, A, CW, CD, stD, shD } = p;
+  const cx = W / 2, cy = (S + D) / 2;
+  const coreRect = [[cx - CW / 2, cy - CD / 2], [cx + CW / 2, cy - CD / 2], [cx + CW / 2, cy + CD / 2], [cx - CW / 2, cy + CD / 2]];
+  const raw = [], widths = [];
+  let nSt = 0;
+  const R = (x0, y0, x1, y1, program, tag) => raw.push({ program, tag, ring: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], holes: [] });
+
+  // stalls stretched to fill the whole row (no leftover slivers)
+  const rowU = (a, b, y0, y1, name) => {
+    const n = Math.floor((b - a) / SW + 1e-6);
+    if (n < 1) { if (b - a > 0.01) R(a, y0, b, y1, null, "left"); return; }
+    const w = (b - a) / n;
+    for (let k = 0; k < n; k++) R(a + k * w, y0, a + (k + 1) * w, y1, "PARKING", "stall");
+    nSt += n; widths.push(name + " " + n + " x " + w.toFixed(2) + " m");
+  };
+  const rowV = (x0, x1, a, b, name) => {
+    const n = Math.floor((b - a) / SW + 1e-6);
+    if (n < 1) { if (b - a > 0.01) R(x0, a, x1, b, null, "left"); return; }
+    const w = (b - a) / n;
+    for (let k = 0; k < n; k++) R(x0, a + k * w, x1, a + (k + 1) * w, "PARKING",
