@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Massing Generator - Test</title>
+<style>
+  body { font-family: Arial, sans-serif; padding: 12px; font-size: 13px; }
+  label { display: block; margin: 8px 0 2px; }
+  input { width: 100%; padding: 6px; box-sizing: border-box; }
+  button { width: 100%; margin-top: 14px; padding: 10px; background: #186faf;
+           color: #fff; border: 0; border-radius: 4px; font-size: 14px; cursor: pointer; }
+  button:disabled { background: #9aa5b1; cursor: default; }
+  #status { margin-top: 14px; white-space: pre-wrap; color: #333; }
+</style>
+</head>
+<body>
+  <h3>Massing Generator - Test</h3>
+
+  <label>Width (m)</label>        <input id="w" type="number" value="20">
+  <label>Depth (m)</label>        <input id="d" type="number" value="30">
+  <label>Number of floors</label> <input id="n" type="number" value="4">
+  <label>Floor height (m)</label> <input id="h" type="number" value="3.5">
+
+  <button id="go">Place test building</button>
+  <div id="status">Connecting to Forma...</div>
+
+<script type="module">
+import { Forma } from "https://esm.sh/forma-embedded-view-sdk@0.x/auto";
+
+const status = document.getElementById("status");
+const btn = document.getElementById("go");
+
+// 1) Check connection and edit rights
+try {
+  const projectId = Forma.getProjectId();
+  const canEdit = await Forma.getCanEdit();
+  status.textContent = "Connected to project: " + projectId +
+                       "\nEdit access: " + (canEdit ? "YES" : "NO");
+  if (!canEdit) btn.disabled = true;
+} catch (e) {
+  status.textContent = "Could not connect to Forma: " + e.message;
+  btn.disabled = true;
+}
+
+// 2) Create building on click
+btn.onclick = async () => {
+  const w = Number(document.getElementById("w").value);
+  const d = Number(document.getElementById("d").value);
+  const n = Number(document.getElementById("n").value);
+  const h = Number(document.getElementById("h").value);
+
+  try {
+    btn.disabled = true;
+
+    // Footprint centred on (0,0) so the click point = building centre
+    const poly = [[-w/2,-d/2],[w/2,-d/2],[w/2,d/2],[-w/2,d/2],[-w/2,-d/2]];
+    const floors = Array.from({ length: n }, () => ({ polygon: poly, height: h }));
+
+    const { urn } = await Forma.elements.floorStack.createFromFloors({ floors });
+
+    status.textContent = "Now click on the map where the building should go...";
+    const point = await Forma.designTool.getPoint();
+    if (!point) { status.textContent = "Cancelled."; return; }
+
+    const transform = [1,0,0,0, 0,1,0,0, 0,0,1,0, point.x, point.y, point.z, 1];
+    await Forma.proposal.addElement({ urn, transform, name: "Test building" });
+
+    status.textContent = "Done!\nFootprint: " + (w*d) + " m2" +
+                         "\nGFA: " + (w*d*n) + " m2" +
+                         "\nHeight: " + (n*h) + " m";
+  } catch (e) {
+    status.textContent = "Error: " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+};
+</script>
+</body>
+</html>
